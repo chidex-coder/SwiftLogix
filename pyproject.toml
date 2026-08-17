@@ -1,0 +1,17 @@
+[project]
+name = "swiftlogix"
+version = "1.0.0"
+description = "Real-time logistics data platform: streaming ingest, contract-driven reliability, incremental warehouse loads"
+requires-python = ">=3.10"
+dependencies = ["duckdb>=1.4", "pyarrow>=17", "jsonschema>=4.21", "rich>=13.7"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

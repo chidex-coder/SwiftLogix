@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "swiftlogix/shipment_event/v2",
+  "title": "ShipmentEvent",
+  "description": "Registered AFTER the partner courier API renamed delivery_window.start -> delivery.window_start. Registering v2 with an explicit field mapping is the remediation; scattering COALESCE through the transform layer is not.",
+  "x-swiftlogix-field-mappings": [
+    { "from": "delivery.window_start", "to": "delivery_window.start" },
+    { "from": "delivery.window_end", "to": "delivery_window.end" }
+  ],
+  "x-swiftlogix-compatibility": "BACKWARD",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "event_ts", "shipment_id", "source"],
+  "properties": {
+    "event_id": { "type": "string", "minLength": 8 },
+    "event_type": {
+      "type": "string",
+      "enum": ["gps_ping", "temperature", "status", "hub_scan"]
+    },
+    "event_ts": { "type": "string" },
+    "shipment_id": { "type": "string", "minLength": 4 },
+    "vehicle_id": { "type": ["string", "null"] },
+    "hub_code": { "type": ["string", "null"] },
+    "source": { "type": "string" },
+    "status": {
+      "type": ["string", "null"],
+      "enum": ["pickup", "in_transit", "exception", "delivered", null]
+    },
+    "geo": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["lat", "lon"],
+      "properties": {
+        "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+        "lon": { "type": "number", "minimum": -180, "maximum": 180 }
+      }
+    },
+    "temperature_c": { "type": ["number", "null"], "minimum": -80, "maximum": 80 },
+    "delivery": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["window_start", "window_end"],
+      "properties": {
+        "window_start": { "type": "string" },
+        "window_end": { "type": "string" }
+      }
+    },
+    "metadata": { "type": ["object", "null"], "additionalProperties": true }
+  }
+}

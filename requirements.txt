@@ -1,0 +1,5 @@
+duckdb>=1.4
+pyarrow>=17
+jsonschema>=4.21
+rich>=13.7
+pytest>=8.0
