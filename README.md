@@ -29,11 +29,17 @@ python3.12 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 make run
 ```
 
-That runs the live pipeline for 90 seconds and drives a scripted incident. You
-will watch, in real time: a partner API silently rename a field, the contract
-layer catch it, the circuit breaker halt promotion to gold, an engineer register
-a new schema version, and a replay recover every quarantined record with zero
-duplicates.
+That runs the live pipeline for 90 seconds and drives two scripted incidents.
+You will watch, in real time: a partner API silently rename a field at a random
+moment, the contract layer catch it, the circuit breaker halt promotion to gold,
+an engineer register a new schema version, and a replay recover every
+quarantined record with zero duplicates. Then, a few seconds after everyone
+relaxes, a *second* partner moves a *different* field that the new contract does
+not cover, and the same controls have to catch it again.
+
+The drift times are drawn from a seeded RNG, so no two seeds produce the same
+timeline but any seed reproduces its own. `--seed`, `--drift-at` and
+`--second-drift-at` pin them when you need a fixed run.
 
 ```bash
 make test
@@ -46,17 +52,32 @@ make test
 ```
 t+000.0s  contract v1 active; 8 shards; target 900 eps
 t+000.0s  warehouse ready (native MERGE INTO: yes)
-t+010.2s  chaos: consumer crashed before checkpoint - 400 records redelivered
-t+020.1s  UPSTREAM: partner_courier_api renamed delivery_window.start
+t+005.8s  chaos: consumer crashed before checkpoint - 400 records redelivered
+t+011.7s  UPSTREAM: partner_courier_api renamed delivery_window.start
           -> delivery.window_start (no notice, no version bump)
-t+022.0s  [CRITICAL] contract_violation: schema violation rate 13.9% (263/1890)
-t+022.0s  [CRITICAL] circuit_breaker: promotion to gold ABORTED - quarantine
-          rate 13.9% exceeds the 5% threshold; last good partition still serving
-t+038.3s  on-call registered contract v2 (compatibility=BREAKING, 2 field
+t+013.1s  [CRITICAL] contract_violation: schema violation rate 10.5%
+t+013.1s  [CRITICAL] circuit_breaker: promotion to gold ABORTED - quarantine
+          rate 10.5% exceeds the 5% threshold; last good partition still serving
+t+029.7s  on-call registered contract v2 (compatibility=BREAKING, 2 field
           mappings) - live traffic now conforms
-t+043.2s  replay: 2,625 quarantined records re-driven, 2,625 recovered,
+t+034.7s  replay: 2,625 quarantined records re-driven, 2,625 recovered,
           2,617 merged into gold, 0 duplicates created
+t+043.1s  UPSTREAM: driver_mobile_app release 4.12 moved geo.lat/lon
+          -> position.latitude/longitude (no changelog entry) - a different
+          partner, a different field, and contract v2 does not cover it
+t+044.7s  [WARNING] contract_violation: schema violation rate 4.8% (95/1980)
+t+047.1s  [CRITICAL] circuit_breaker: promotion to gold ABORTED - quarantine
+          rate 7.9% exceeds the 5% threshold; last good partition still serving
+t+061.3s  on-call registered contract v3 (compatibility=BREAKING, 2 field
+          mappings) - live traffic now conforms
+t+066.0s  replay: 1,222 quarantined records re-driven, 1,222 recovered,
+          1,222 merged into gold, 0 duplicates created
 ```
+
+(One run with the default seed; the drift seconds move with the seed.) Gold ends
+the run with three contract versions coexisting — `v1=27,967 · v2=6,987 ·
+v3=2,184` — every one of them mapped back to the same canonical columns, so no
+downstream query ever learns that either partner changed.
 
 The real incident took **11 days** to notice. Here it takes **1.9 seconds**, and
 the difference is not cleverness — it is that the contract is a registered,
@@ -195,7 +216,9 @@ crashes a consumer before checkpointing to prove it.
 Note what is deliberately **absent**: no `COALESCE(delivery_window_start,
 delivery.window_start)` anywhere. That converts a one-time contract update into
 permanent undocumented debt and hides the next drift completely. The contract
-belongs in the registry, versioned, with an explicit field mapping.
+belongs in the registry, versioned, with an explicit field mapping — and the
+second incident is the proof: a v2 written as COALESCE would have done nothing
+for the driver app's `position` move, whereas v3 is one more registered mapping.
 
 The `metadata` object is the one place schema-on-read applies — it is `additionalProperties: true`
 on purpose, so a partner adding a field is a non-event rather than an incident.
@@ -237,9 +260,9 @@ reprocess.
 ## Commands
 
 ```bash
-make run          # 90s live pipeline with the scripted drift incident
+make run          # 90s live pipeline with two scripted drift incidents (random timing)
 make run-long     # 3 minutes at higher throughput
-make test         # 21 tests
+make test         # 31 tests
 make query        # consumer-facing analytics against the loaded warehouse
 make costs        # cost model only
 make clean        # wipe generated lake + warehouse
@@ -249,6 +272,8 @@ Direct invocation:
 
 ```bash
 PYTHONPATH=src ./.venv/bin/python -m swiftlogix.cli run --duration 120 --eps 2000 --fresh
+PYTHONPATH=src ./.venv/bin/python -m swiftlogix.cli run --seed 7 --fresh                    # a different timeline, reproducibly
+PYTHONPATH=src ./.venv/bin/python -m swiftlogix.cli run --drift-at 20 --second-drift-at 55  # pinned
 ```
 
 ---
@@ -256,10 +281,11 @@ PYTHONPATH=src ./.venv/bin/python -m swiftlogix.cli run --duration 120 --eps 200
 ## Layout
 
 ```
-contracts/          versioned JSON Schema contracts (v1, v2 + field mappings)
+contracts/          versioned JSON Schema contracts (v1; v2 and v3 each with field mappings)
 sql/                warehouse DDL — raw vault, star marts, operational metadata
 src/swiftlogix/
-  generator.py      synthetic fleet: lifecycle, duplicates, late arrivals, drift
+  generator.py      synthetic fleet: lifecycle, duplicates, late arrivals, per-partner drift
+  incidents.py      the two scripted incidents and their seeded random timing
   stream.py         Kinesis analogue: shards, checkpoints, replay, throttling
   registry.py       schema registry, compatibility checks, canonical mapping
   ingest.py         Firehose + validation Lambda → bronze / quarantine

@@ -10,8 +10,11 @@ hard in production:
   1. at-least-once redelivery  -> byte-identical duplicates with the same event_id
   2. late arrivals             -> events with an event_ts up to 24h in the past
   3. heterogeneous metadata    -> a nested object whose keys vary by source
-  4. silent schema drift       -> one partner renames delivery_window.start to
-                                 delivery.window_start, mid-stream, without notice
+  4. silent schema drift       -> partners change their payload shape mid-stream,
+                                 without notice: the courier API renames
+                                 delivery_window.start to delivery.window_start,
+                                 and later the driver app moves geo.lat/lon to
+                                 position.latitude/longitude
 """
 
 from __future__ import annotations
@@ -32,6 +35,14 @@ COUNTRIES = [
     "SE", "NO", "DK", "FI", "CH", "RO", "HU", "GR", "US", "CA", "MX", "BR",
     "AE", "SA", "ZA", "IN", "SG", "JP", "AU", "NZ",
 ]
+
+# The ways a partner can silently change shape. Each is a structural move --
+# nothing errors, the old path just reads as null -- which is exactly the class
+# of failure the contract layer exists to catch.
+DRIFT_KINDS = {
+    "delivery_window": "delivery_window.start/end -> delivery.window_start/window_end",
+    "geo": "geo.lat/lon -> position.latitude/longitude",
+}
 
 SOURCES = [
     ("telematics_gateway", 0.52),
@@ -78,7 +89,7 @@ class EventGenerator:
             f"HUB-{COUNTRIES[i % len(COUNTRIES)]}-{i:03d}" for i in range(cfg.hubs)
         ]
         self.active: Dict[str, Shipment] = {}
-        self.drift_active = False
+        self.drifts: Dict[str, str] = {}  # source -> DRIFT_KINDS key, once that partner has drifted
         self._seq = 0
         self._recent: List[Dict[str, Any]] = []  # pool for duplicate redelivery
 
@@ -88,6 +99,11 @@ class EventGenerator:
             "late": 0,
             "drifted": 0,
         }
+        self.drifted_by_source: Dict[str, int] = {}
+
+    @property
+    def drift_active(self) -> bool:
+        return bool(self.drifts)
 
     # ------------------------------------------------------------------
     # shipment lifecycle
@@ -186,6 +202,9 @@ class EventGenerator:
             if status == "delivered":
                 shipment.done = True
 
+        drift = self.drifts.get(source)
+        geo = {"lat": round(shipment.lat, 5), "lon": round(shipment.lon, 5)}
+
         payload: Dict[str, Any] = {
             "event_id": uuid.uuid4().hex,
             "event_type": event_type,
@@ -198,25 +217,35 @@ class EventGenerator:
             "hub_code": shipment.hub_code,
             "source": source,
             "status": status,
-            "geo": {"lat": round(shipment.lat, 5), "lon": round(shipment.lon, 5)},
             "temperature_c": shipment.temp_c if event_type == "temperature" else None,
             "metadata": self._metadata(source),
         }
+
+        # The position block -- and, for the driver app after its drift, the
+        # field that moved: a new app release started emitting position.latitude
+        # instead of geo.lat. No changelog entry, no version bump.
+        if drift == "geo":
+            payload["position"] = {"latitude": geo["lat"], "longitude": geo["lon"]}
+        else:
+            payload["geo"] = geo
 
         # The delivery window block -- and the field that silently moved.
         window = {
             "start": shipment.delivery_start.isoformat(),
             "end": shipment.delivery_end.isoformat(),
         }
-        if self.drift_active and source == self.cfg.drift_source:
+        if drift == "delivery_window":
             # v2 shape emitted with no version bump, no announcement, no error.
             payload["delivery"] = {
                 "window_start": window["start"],
                 "window_end": window["end"],
             }
-            self.counters["drifted"] += 1
         else:
             payload["delivery_window"] = window
+
+        if drift:
+            self.counters["drifted"] += 1
+            self.drifted_by_source[source] = self.drifted_by_source.get(source, 0) + 1
 
         shipment.events_emitted += 1
         if shipment.done and shipment.events_emitted > 6:
@@ -227,13 +256,15 @@ class EventGenerator:
     # ------------------------------------------------------------------
     # public API
     # ------------------------------------------------------------------
-    def trigger_drift(self) -> None:
-        """Flip the partner onto the renamed schema.
+    def trigger_drift(self, source: Optional[str] = None, kind: str = "delivery_window") -> None:
+        """Flip one partner onto a changed schema.
 
         There is deliberately no way to turn this off. The partner is not going
         to roll back; remediation happens on our side, in the registry.
         """
-        self.drift_active = True
+        if kind not in DRIFT_KINDS:
+            raise ValueError(f"unknown drift kind {kind!r}; expected one of {sorted(DRIFT_KINDS)}")
+        self.drifts[source or self.cfg.drift_source] = kind
 
     def emit(self, n: int) -> Iterator[Dict[str, Any]]:
         """Yield n payloads, including redelivered duplicates."""

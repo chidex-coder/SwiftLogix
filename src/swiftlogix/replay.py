@@ -2,8 +2,9 @@
 
 Recovery from the drift incident is a bounded backfill, not a table rebuild:
 
-  1. register schema v2 with an explicit field mapping (never COALESCE sprawl
-     scattered through the transform layer -- that hides the next drift)
+  1. register the next schema version with an explicit field mapping (never
+     COALESCE sprawl scattered through the transform layer -- that hides the
+     next drift, and there is always a next drift)
   2. re-validate every quarantined payload against the now-active contract set
   3. re-land the ones that now conform into bronze
   4. re-run the same incremental MERGE
@@ -45,16 +46,13 @@ def remediate_schema(
     warehouse: Warehouse,
     version: str = "v2",
     actor: str = "platform-oncall",
+    note: str = "partner renamed delivery_window.start -> delivery.window_start",
 ) -> Dict[str, object]:
-    """Register the new contract version after a compatibility review."""
+    """Register a new contract version after a compatibility review."""
     registry.load(version)
     compatible, problems = registry.check_compatibility("v1", version)
 
-    registry.activate(
-        version,
-        actor=actor,
-        note="partner renamed delivery_window.start -> delivery.window_start",
-    )
+    registry.activate(version, actor=actor, note=note)
     warehouse.log_schema_change(
         version,
         "ACTIVATE",
@@ -88,24 +86,24 @@ def replay_quarantine(
         return result
 
     recovered_records: List[Record] = []
+    rejected_records: List[Record] = []
     for path in files:
         table = pq.read_table(path)
         for row in table.to_pylist():
             result.quarantined_scanned += 1
             payload = json.loads(row["raw_payload"])
-            verdict = registry.validate(payload)
-            if verdict.ok:
-                recovered_records.append(
-                    Record(
-                        shard_id="replay",
-                        sequence_number=-1,
-                        partition_key=payload.get("shipment_id", ""),
-                        approximate_arrival_ts=datetime.now(timezone.utc),
-                        data=payload,
-                    )
-                )
+            record = Record(
+                shard_id="replay",
+                sequence_number=-1,
+                partition_key=payload.get("shipment_id", ""),
+                approximate_arrival_ts=datetime.now(timezone.utc),
+                data=payload,
+            )
+            if registry.validate(payload).ok:
+                recovered_records.append(record)
             else:
                 result.still_rejected += 1
+                rejected_records.append(record)
 
     if recovered_records:
         # Re-land through the normal ingest path so bronze stays the single
@@ -116,8 +114,14 @@ def replay_quarantine(
             stats = warehouse.merge_batch([batch.bronze_path], batch.quarantine_pct)
             result.rows_merged = stats.rows_merged
 
-    # Quarantine files are archived, not deleted -- they are the audit trail
-    # for the restatement Finance has to sign off on.
+    # Records this contract set still cannot explain go back into the active
+    # quarantine, so the next remediation (there is always a next one) can
+    # replay them. Archiving them with the recovered file would strand them.
+    if rejected_records:
+        delivery.deliver(rejected_records)
+
+    # The scanned quarantine files are archived, not deleted -- they are the
+    # audit trail for the restatement Finance has to sign off on.
     archive = cfg.lake_dir / "quarantine_archive"
     archive.mkdir(parents=True, exist_ok=True)
     for path in files:

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "swiftlogix/shipment_event/v3",
+  "title": "ShipmentEvent",
+  "description": "Registered AFTER the driver mobile app (release 4.12) moved geo.lat/geo.lon -> position.latitude/position.longitude with no changelog entry. v3 covers only this partner's shape; the courier API's shape stays on v2, so the three versions coexist in gold and each maps back to the canonical v1 columns.",
+  "x-swiftlogix-field-mappings": [
+    { "from": "position.latitude", "to": "geo.lat" },
+    { "from": "position.longitude", "to": "geo.lon" }
+  ],
+  "x-swiftlogix-compatibility": "BACKWARD",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "event_ts", "shipment_id", "source"],
+  "properties": {
+    "event_id": { "type": "string", "minLength": 8 },
+    "event_type": {
+      "type": "string",
+      "enum": ["gps_ping", "temperature", "status", "hub_scan"]
+    },
+    "event_ts": { "type": "string" },
+    "shipment_id": { "type": "string", "minLength": 4 },
+    "vehicle_id": { "type": ["string", "null"] },
+    "hub_code": { "type": ["string", "null"] },
+    "source": { "type": "string" },
+    "status": {
+      "type": ["string", "null"],
+      "enum": ["pickup", "in_transit", "exception", "delivered", null]
+    },
+    "position": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["latitude", "longitude"],
+      "properties": {
+        "latitude": { "type": "number", "minimum": -90, "maximum": 90 },
+        "longitude": { "type": "number", "minimum": -180, "maximum": 180 }
+      }
+    },
+    "temperature_c": { "type": ["number", "null"], "minimum": -80, "maximum": 80 },
+    "delivery_window": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": "string" },
+        "end": { "type": "string" }
+      }
+    },
+    "metadata": { "type": ["object", "null"], "additionalProperties": true }
+  }
+}

@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional, Tuple
 
 # --------------------------------------------------------------------------
 # Production scale (from the business case)
@@ -59,9 +60,19 @@ class Config:
     late_arrival_rate: float = 0.01
 
     # ---- drift injection -------------------------------------------------
-    drift_at_second: float = 20.0
+    # Two partners drift, at different times and in different ways. The first
+    # drift time is drawn from a window with a seeded RNG (reproducible with
+    # --seed, pinnable with --drift-at); the second partner drifts a random
+    # few seconds after the first incident has been replayed, so the on-call
+    # gets to find out whether the fix generalised.
+    drift_window_seconds: Tuple[float, float] = (10.0, 24.0)
+    drift_at_second: Optional[float] = None  # None -> random within the window
     drift_source: str = "partner_courier_api"
     drift_share: float = 0.18  # share of traffic from the drifting partner
+    second_drift_source: str = "driver_mobile_app"
+    second_drift_share: float = 0.08
+    second_drift_delay_seconds: Tuple[float, float] = (5.0, 10.0)  # after the first replay
+    second_drift_at_second: Optional[float] = None  # None -> random after the first replay
     auto_remediate_after_seconds: float = 18.0  # 0 disables auto-remediation
 
     # ---- run ------------------------------------------------------------

@@ -6,11 +6,14 @@ Three threads, mirroring the three tiers of the production design:
   ingest     stream -> validate -> bronze parquet / quarantine (Firehose+Lambda)
   warehouse  bronze -> dedup -> MERGE -> vault + marts (Snowpipe + dbt)
 
-The run drives a scripted incident so the reliability controls are exercised
-rather than merely described: the partner API silently renames a field, the
-contract layer catches it inside one buffer window, the circuit breaker halts
-promotion, the on-call registers v2 with a field mapping, and the quarantined
-records are replayed through the same idempotent MERGE.
+The run drives two scripted incidents so the reliability controls are
+exercised rather than merely described. At a random second the courier API
+silently renames a field; the contract layer catches it inside one buffer
+window, the circuit breaker halts promotion, the on-call registers v2 with a
+field mapping, and the quarantined records are replayed through the same
+idempotent MERGE. A few seconds after that replay lands, a second partner (the
+driver app) moves a different field - one v2 does not cover - and the same
+controls have to catch it again and land v3 alongside v1 and v2 in gold.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from .generator import EventGenerator
 from .ingest import BatchResult, FirehoseDelivery
 from .monitors import CRITICAL, WARNING, MonitorSuite
 from .registry import SchemaRegistry
+from .incidents import Incident, plan_incidents
 from .replay import remediate_schema, replay_quarantine
 from .stream import Consumer, KinesisLikeStream
 from .warehouse import Warehouse
@@ -63,8 +67,7 @@ class RunState:
     lag: int = 0
     counts: Dict[str, int] = field(default_factory=dict)
     timeline: List[str] = field(default_factory=list)
-    drift_active: bool = False
-    remediated: bool = False
+    incidents: List[Incident] = field(default_factory=list)
     # Published by the warehouse thread as soon as it connects, so the incident
     # script can drive remediation and replay against the live connection
     # rather than opening a second one against the same database file.
@@ -79,6 +82,14 @@ class RunState:
     @property
     def elapsed(self) -> float:
         return time.monotonic() - self.started
+
+    @property
+    def drift_active(self) -> bool:
+        return any(i.open for i in self.incidents)
+
+    @property
+    def remediated(self) -> bool:
+        return bool(self.incidents) and all(i.done for i in self.incidents)
 
     def note(self, message: str) -> None:
         with self.lock:
@@ -192,11 +203,15 @@ def render(cfg: Config, state: RunState, monitors: MonitorSuite,
     header = Table.grid(expand=True)
     header.add_column(justify="left")
     header.add_column(justify="right")
+    open_incidents = [i for i in state.incidents if i.open]
+    done_incidents = [i for i in state.incidents if i.done]
     phase = (
-        "[bold red]INCIDENT: schema drift active[/]"
-        if state.drift_active and not state.remediated
-        else "[bold green]REMEDIATED - replay complete[/]"
+        f"[bold red]INCIDENT: schema drift active ({', '.join(i.source for i in open_incidents)})[/]"
+        if open_incidents
+        else f"[bold green]REMEDIATED - {len(done_incidents)} incident(s) replayed[/]"
         if state.remediated
+        else f"[bold yellow]steady state - {len(done_incidents)} incident(s) replayed[/]"
+        if done_incidents
         else "[bold cyan]steady state[/]"
     )
     header.add_row(
@@ -274,6 +289,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     cfg.target_eps = args.eps
     if args.data_dir:
         cfg.data_dir = Path(args.data_dir)
+    if args.seed is not None:
+        cfg.seed = args.seed
+    if args.drift_at is not None:
+        cfg.drift_at_second = args.drift_at
+    if args.second_drift_at is not None:
+        cfg.second_drift_at_second = args.second_drift_at
     if args.fresh and cfg.data_dir.exists():
         import shutil
 
@@ -303,10 +324,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     for t in threads:
         t.start()
 
-    drift_at = cfg.drift_at_second
-    remediate_at = drift_at + cfg.auto_remediate_after_seconds
-    rewind_at = drift_at * 0.5
+    state.incidents = plan_incidents(cfg)
+    first = state.incidents[0]
+    rewind_at = (first.at or 0.0) * 0.5
     rewound = False
+    pending = list(state.incidents)
 
     with Live(render(cfg, state, monitors, gen, stream), console=console,
               refresh_per_second=4, screen=False) as live:
@@ -318,33 +340,42 @@ def cmd_run(args: argparse.Namespace) -> int:
                 consumer.rewind(400)
                 state.note("chaos: consumer crashed before checkpoint - 400 records redelivered")
 
-            if not state.drift_active and now >= drift_at:
-                gen.trigger_drift()
-                state.drift_active = True
-                state.note(
-                    f"UPSTREAM: {cfg.drift_source} renamed delivery_window.start "
-                    "-> delivery.window_start (no notice, no version bump)"
-                )
-
-            if state.drift_active and not state.remediated and state.wh and now >= remediate_at:
-                with state.wh_lock:
-                    outcome = remediate_schema(registry, state.wh)
-                state.note(
-                    f"on-call registered contract {outcome['version']} "
-                    f"(compatibility={'FULL' if outcome['compatible'] else 'BREAKING'}, "
-                    f"{len(outcome['mappings'])} field mappings) - live traffic now conforms"
-                )
-                # Let the next buffer window land under the new contract before
-                # replaying, so the recovery is measured against a healthy stream.
-                time.sleep(cfg.buffer_seconds * 2)
-                with state.wh_lock:
-                    result = replay_quarantine(cfg, registry, delivery, state.wh)
-                state.note(
-                    f"replay: {result.quarantined_scanned:,} quarantined records re-driven, "
-                    f"{result.recovered:,} recovered, {result.rows_merged:,} merged into gold, "
-                    f"{result.duplicates_created} duplicates created"
-                )
-                state.remediated = True
+            # Incidents fire strictly in order; the next one is only scheduled
+            # once the previous replay has landed, unless its time was pinned.
+            inc = pending[0] if pending else None
+            if inc is not None:
+                if inc.at is None:
+                    prev = state.incidents[state.incidents.index(inc) - 1]
+                    if prev.replayed_at is not None:
+                        inc.at = round(prev.replayed_at + inc.delay_after_previous, 1)
+                elif inc.triggered_at is None and now >= inc.at:
+                    gen.trigger_drift(inc.source, inc.kind)
+                    inc.triggered_at = now
+                    state.note(inc.announcement)
+                elif (inc.triggered_at is not None and inc.remediated_at is None and state.wh
+                      and inc.remediate_after > 0 and now >= inc.triggered_at + inc.remediate_after):
+                    with state.wh_lock:
+                        outcome = remediate_schema(registry, state.wh, version=inc.contract_version,
+                                                   note=inc.remediation_note)
+                    inc.remediated_at = now
+                    state.note(
+                        f"on-call registered contract {outcome['version']} "
+                        f"(compatibility={'FULL' if outcome['compatible'] else 'BREAKING'}, "
+                        f"{len(outcome['mappings'])} field mappings) - live traffic now conforms"
+                    )
+                    # Let the next buffer window land under the new contract before
+                    # replaying, so the recovery is measured against a healthy stream.
+                    time.sleep(cfg.buffer_seconds * 2)
+                    with state.wh_lock:
+                        result = replay_quarantine(cfg, registry, delivery, state.wh)
+                    inc.replay_summary = (
+                        f"{result.quarantined_scanned:,} quarantined records re-driven, "
+                        f"{result.recovered:,} recovered, {result.rows_merged:,} merged into gold, "
+                        f"{result.duplicates_created} duplicates created"
+                    )
+                    inc.replayed_at = state.elapsed
+                    state.note(f"replay: {inc.replay_summary}")
+                    pending.pop(0)
 
             live.update(render(cfg, state, monitors, gen, stream))
             time.sleep(0.25)
@@ -375,7 +406,7 @@ def _final_report(cfg: Config, state: RunState, gen: EventGenerator,
     versions = wh.con.execute(
         "SELECT schema_version, count(*) FROM gold.fact_shipment_events GROUP BY 1 ORDER BY 2 DESC"
     ).fetchall()
-    v2_rows = sum(n for v, n in versions if v == "v2")
+    rows_by_version = {v: n for v, n in versions}
 
     t = Table(title="correctness assertions", header_style="bold", expand=True)
     t.add_column("assertion")
@@ -389,10 +420,13 @@ def _final_report(cfg: Config, state: RunState, gen: EventGenerator,
     row("duplicates suppressed by MERGE", f"{state.duplicates:,}", state.duplicates > 0)
     row("quarantined records retained with raw payload", f"{state.quarantined:,}", True)
     row("critical alerts raised during drift", monitors.critical_count, monitors.critical_count > 0)
-    row("drifted records recovered under contract v2", f"{v2_rows:,}",
-        v2_rows > 0 or not state.remediated)
+    for inc in state.incidents:
+        n = rows_by_version.get(inc.contract_version, 0)
+        row(f"{inc.source} records recovered under contract {inc.contract_version}", f"{n:,}",
+            n > 0 or not inc.done)
+    expected_versions = 1 + sum(1 for i in state.incidents if i.done)
     row("schema versions coexisting in gold",
-        ", ".join(f"{v}={n:,}" for v, n in versions), len(versions) >= 1)
+        ", ".join(f"{v}={n:,}" for v, n in versions), len(versions) >= expected_versions)
     row("shipments in Ops mart", f"{counts['shipments']:,}", counts["shipments"] > 0)
     row("stream throttling (capacity headroom held)", stream.throttled_records,
         stream.throttled_records == 0)
@@ -441,8 +475,11 @@ def _final_report(cfg: Config, state: RunState, gen: EventGenerator,
     console.print(
         f"\ngenerator: {gen.counters['generated']:,} unique · "
         f"{gen.counters['duplicates']:,} redelivered · {gen.counters['late']:,} late · "
-        f"{gen.counters['drifted']:,} emitted with the drifted schema"
+        f"{gen.counters['drifted']:,} emitted with a drifted schema ("
+        + ", ".join(f"{src} {n:,}" for src, n in sorted(gen.drifted_by_source.items())) + ")"
     )
+    timings = " · ".join(f"{i.source} drifted at t+{i.triggered_at:.1f}s" for i in state.incidents if i.triggered_at is not None)
+    console.print(f"incidents (seed {cfg.seed}): {timings or 'none fired'}")
     console.print(f"warehouse: [bold]{cfg.warehouse_path}[/]  ·  lake: [bold]{cfg.lake_dir}[/]")
 
 
@@ -515,11 +552,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="swiftlogix", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_run = sub.add_parser("run", help="run the live pipeline with a scripted drift incident")
+    p_run = sub.add_parser("run", help="run the live pipeline with two scripted drift incidents")
     p_run.add_argument("--duration", type=float, default=90.0)
     p_run.add_argument("--eps", type=int, default=1200)
     p_run.add_argument("--data-dir", type=str, default=None)
     p_run.add_argument("--fresh", action="store_true", help="wipe the lake and warehouse first")
+    p_run.add_argument("--seed", type=int, default=None,
+                       help="RNG seed for traffic and incident timing (same seed = same run)")
+    p_run.add_argument("--drift-at", type=float, default=None,
+                       help="pin the first drift to this second instead of drawing it at random")
+    p_run.add_argument("--second-drift-at", type=float, default=None,
+                       help="pin the second partner's drift instead of scheduling it after the first replay")
     p_run.set_defaults(func=cmd_run)
 
     p_cost = sub.add_parser("costs", help="print the monthly cost model")

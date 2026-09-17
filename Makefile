@@ -9,7 +9,7 @@ help:
 venv: ## create the virtualenv and install dependencies
 	python3.12 -m venv .venv && ./.venv/bin/pip install -q -r requirements.txt
 
-run: ## 90s live pipeline with the scripted drift incident
+run: ## 90s live pipeline with two scripted drift incidents (random timing)
 	$(PY) -m swiftlogix.cli run --duration 90 --eps 900 --fresh
 
 run-long: ## 3 minutes at higher throughput
