@@ -52,31 +52,31 @@ make test
 ```
 t+000.0s  contract v1 active; 8 shards; target 900 eps
 t+000.0s  warehouse ready (native MERGE INTO: yes)
-t+005.8s  chaos: consumer crashed before checkpoint - 400 records redelivered
+t+005.9s  chaos: consumer crashed before checkpoint - 400 records redelivered
 t+011.7s  UPSTREAM: partner_courier_api renamed delivery_window.start
           -> delivery.window_start (no notice, no version bump)
-t+013.1s  [CRITICAL] contract_violation: schema violation rate 10.5%
-t+013.1s  [CRITICAL] circuit_breaker: promotion to gold ABORTED - quarantine
-          rate 10.5% exceeds the 5% threshold; last good partition still serving
-t+029.7s  on-call registered contract v2 (compatibility=BREAKING, 2 field
+t+013.2s  [CRITICAL] contract_violation: schema violation rate 10.3%
+t+013.2s  [CRITICAL] circuit_breaker: promotion to gold ABORTED - quarantine
+          rate 10.3% exceeds the 5% threshold; last good partition still serving
+t+029.9s  on-call registered contract v2 (compatibility=BREAKING, 2 field
           mappings) - live traffic now conforms
-t+034.7s  replay: 2,625 quarantined records re-driven, 2,625 recovered,
-          2,617 merged into gold, 0 duplicates created
-t+043.1s  UPSTREAM: driver_mobile_app release 4.12 moved geo.lat/lon
+t+034.8s  replay: 2,633 quarantined records re-driven, 2,633 recovered,
+          2,625 merged into gold, 0 duplicates created
+t+043.3s  UPSTREAM: driver_mobile_app release 4.12 moved geo.lat/lon
           -> position.latitude/longitude (no changelog entry) - a different
           partner, a different field, and contract v2 does not cover it
-t+044.7s  [WARNING] contract_violation: schema violation rate 4.8% (95/1980)
-t+047.1s  [CRITICAL] circuit_breaker: promotion to gold ABORTED - quarantine
-          rate 7.9% exceeds the 5% threshold; last good partition still serving
-t+061.3s  on-call registered contract v3 (compatibility=BREAKING, 2 field
+t+044.9s  [CRITICAL] contract_violation: schema violation rate 6.8%
+t+044.9s  [CRITICAL] circuit_breaker: promotion to gold ABORTED - quarantine
+          rate 6.8% exceeds the 5% threshold; last good partition still serving
+t+061.4s  on-call registered contract v3 (compatibility=BREAKING, 2 field
           mappings) - live traffic now conforms
-t+066.0s  replay: 1,222 quarantined records re-driven, 1,222 recovered,
-          1,222 merged into gold, 0 duplicates created
+t+066.3s  replay: 1,795 quarantined records re-driven, 1,795 recovered,
+          1,795 merged into gold, 0 duplicates created
 ```
 
 (One run with the default seed; the drift seconds move with the seed.) Gold ends
-the run with three contract versions coexisting — `v1=27,967 · v2=6,987 ·
-v3=2,184` — every one of them mapped back to the same canonical columns, so no
+the run with three contract versions coexisting — `v1=25,701 · v2=6,545 ·
+v3=3,194` — every one of them mapped back to the same canonical columns, so no
 downstream query ever learns that either partner changed.
 
 The real incident took **11 days** to notice. Here it takes **1.9 seconds**, and

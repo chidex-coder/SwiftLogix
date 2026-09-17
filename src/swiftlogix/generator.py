@@ -45,10 +45,10 @@ DRIFT_KINDS = {
 }
 
 SOURCES = [
-    ("telematics_gateway", 0.52),
+    ("telematics_gateway", 0.48),
     ("hub_scanner_net", 0.22),
     ("partner_courier_api", 0.18),
-    ("driver_mobile_app", 0.08),
+    ("driver_mobile_app", 0.12),  # large enough that its drift trips the 5% breaker in one batch
 ]
 
 

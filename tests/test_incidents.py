@@ -63,6 +63,7 @@ def _events_by_source(gen: EventGenerator, n: int = 3000) -> dict:
 
 def test_second_partner_moves_geo_and_only_that_partner():
     cfg = Config()
+    cfg.redelivery_rate = 0.0  # redelivered copies are not newly drifted events; keep the count exact
     gen = EventGenerator(cfg)
     assert not gen.drift_active
     gen.trigger_drift(cfg.second_drift_source, "geo")

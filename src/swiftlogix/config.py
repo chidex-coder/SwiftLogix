@@ -70,7 +70,7 @@ class Config:
     drift_source: str = "partner_courier_api"
     drift_share: float = 0.18  # share of traffic from the drifting partner
     second_drift_source: str = "driver_mobile_app"
-    second_drift_share: float = 0.08
+    second_drift_share: float = 0.12  # share of traffic from the second drifting partner
     second_drift_delay_seconds: Tuple[float, float] = (5.0, 10.0)  # after the first replay
     second_drift_at_second: Optional[float] = None  # None -> random after the first replay
     auto_remediate_after_seconds: float = 18.0  # 0 disables auto-remediation
