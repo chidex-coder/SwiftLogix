@@ -228,10 +228,11 @@ class EventGenerator:
     # public API
     # ------------------------------------------------------------------
     def trigger_drift(self) -> None:
-        self.drift_active = True
+        """Flip the partner onto the renamed schema.
 
-    def resolve_drift(self) -> None:
-        """The partner is not going to roll back. We adapt; they do not."""
+        There is deliberately no way to turn this off. The partner is not going
+        to roll back; remediation happens on our side, in the registry.
+        """
         self.drift_active = True
 
     def emit(self, n: int) -> Iterator[Dict[str, Any]]:
