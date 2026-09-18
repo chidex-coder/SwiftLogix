@@ -86,20 +86,74 @@ into a Spark job.
 
 ---
 
-## Architecture
+## Solution Architecture
 
 ```
-producers            ingest + contract gate          storage            serving
-─────────            ──────────────────────          ───────            ───────
-85k vehicles  ──┐
-240 hubs      ──┼─▶ Kinesis Data Streams ──▶ Firehose ──▶ bronze/  ──┬─▶ Ops mart      < 5 min
-partner API   ──┘   8 shards, 7d retention   + validate   (Parquet   │   (current state)
-                    partition key: vehicle     Lambda      + ZSTD)   │
-                                                  │                  ├─▶ Finance mart  daily
-                                                  └──▶ quarantine/   │   (restatement-aware)
-                                                       + raw payload │
-                                                                     └─▶ DS / raw vault
-                                                                         (atomic grain)
+                     +----------------------------+
+                     |  Synthetic Fleet Generator |
+                     |  85k vehicles · 240 hubs   |
+                     |  4 producers · 2 drift     |
+                     +-------------+--------------+
+                                   |
+                                   v
+                        Kinesis Data Streams
+                   8 shards · vehicle_id partition key
+                   at-least-once · 7-day retention
+                                   |
+                                   v
+                     Firehose + Validation Lambda
+                     Schema Registry  v1 → v2 → v3
+                 contract · null-rate · freshness · canary
+                                   |
+                  +----------------+----------------+
+                  |                                 |
+                  v                                 v
+          Bronze Data Lake                     Quarantine
+          Parquet + ZSTD                    raw payload kept
+          dt=/hr= partitions            rejection reason logged
+                  |                                 |
+                  v                                 v
+          Dedup + Watermark                 Replay after fix
+          ROW_NUMBER · 24h window          same idempotent MERGE
+                  |                                 |
+                  +----------------+----------------+
+                                   |
+                                   v
+                       Write-Audit-Publish Gate
+                  null-rate · circuit breaker at 5%
+                                   |
+                                   v
+                       Partition-pruned MERGE
+                      ON event_id AND event_date
+                                   |
+                  +----------------+----------------+
+                  |                                 |
+                  v                                 v
+            Raw Data Vault                    Star Schema
+         hub · link · satellite          fact_* + dim_* · hash keys
+                  |                                 |
+                  +----------------+----------------+
+                                   |
+                                   v
+                          Gold Serving Layer
+                                   |
+               +-------------------+-------------------+
+               |                   |                   |
+               v                   v                   v
+          Ops Mart            Finance Mart          DS / Vault
+       current state          daily recon         atomic grain
+        < 5 min SLA         restatement-aware      Iceberg + Spot
+               |                   |                   |
+               +-------------------+-------------------+
+                                   |
+                                   v
+                 Live Console + Correctness Assertions
+                                   |
+                  +----------------+----------------+
+                  |                                 |
+                  v                                 v
+          Pytest Validation                   Cost Model
+             31 tests                    measured reprocess ratio
 ```
 
 **Ingestion.** 8 provisioned shards. Peak 4,500 eps ÷ 1,000 records/sec per shard
@@ -294,7 +348,7 @@ src/swiftlogix/
   replay.py         remediation + bounded backfill from quarantine
   costs.py          measurement-driven cost model
   cli.py            three-thread orchestrator + live console
-tests/              21 tests pinning the claims above
+tests/              31 tests pinning the claims above
 docs/               architecture notes and the written case-study responses
 ```
 
